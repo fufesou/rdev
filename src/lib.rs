@@ -265,6 +265,32 @@ pub use crate::macos::{set_is_main_thread, Keyboard, VirtualInput};
 #[cfg(target_os = "macos")]
 pub use core_graphics::{event::CGEventTapLocation, event_source::CGEventSourceStateID};
 
+#[cfg(target_os = "macos")]
+/// Selects the macOS hardware keyboard type used when translating physical keycodes.
+///
+/// This does not switch the current macOS input source, keyboard layout, or IME.
+/// Character output is still translated with the active system input source.
+/// For example, `Iso` means ISO hardware type, not a specific country layout
+/// such as British, German, or French.
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum MacKeyboardType {
+    /// Use the system keyboard type reported by macOS.
+    Current,
+    /// Use ANSI hardware keyboard translation.
+    Ansi,
+    /// Use ISO hardware keyboard translation.
+    Iso,
+    /// Use JIS hardware keyboard translation.
+    Jis,
+    /// Use a raw CoreGraphics keyboard type value.
+    ///
+    /// This is an opaque CoreGraphics keyboard type ID, not a stable keyboard
+    /// layout selector. Prefer the named variants unless the value comes from
+    /// CoreGraphics or another macOS system API.
+    Raw(u32),
+}
+
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub use crate::keycodes::linux::{code_from_key, key_from_code};
 #[cfg(target_os = "linux")]

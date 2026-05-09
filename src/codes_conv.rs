@@ -155,7 +155,7 @@ mod test {
                     continue;
                 }
                 if let Some(code2) = super::usb_hid_code_to_macos_code(usb_hid) {
-                    assert_eq!(code, code2 as u32)
+                    assert_eq!(u32::from(code), code2 as u32)
                 } else {
                     assert!(false, "We could not convert back code: {:?}", code);
                 }
