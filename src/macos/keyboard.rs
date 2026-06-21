@@ -13,6 +13,15 @@ type TISInputSourceRef = *mut c_void;
 type ModifierState = u32;
 type UniCharCount = usize;
 
+// UCKeyTranslate expects Carbon modifierKeyState values, encoded as
+// cmdKey/shiftKey/alphaLock/optionKey/controlKey shifted right by 8.
+pub(crate) const MODIFIER_STATE_NONE: ModifierState = 0;
+pub(crate) const MODIFIER_STATE_COMMAND: ModifierState = 1;
+pub(crate) const MODIFIER_STATE_SHIFT: ModifierState = 2;
+pub(crate) const MODIFIER_STATE_CAPS_LOCK: ModifierState = 4;
+pub(crate) const MODIFIER_STATE_ALT: ModifierState = 8;
+pub(crate) const MODIFIER_STATE_CONTROL: ModifierState = 16;
+
 type OptionBits = c_uint;
 #[allow(non_upper_case_globals)]
 const kUCKeyTranslateDeadKeysBit: OptionBits = 1 << 31;
@@ -83,74 +92,27 @@ extern "C" {
     static kTISPropertyUnicodeKeyLayoutData: *mut c_void;
 }
 
-pub struct Keyboard {
-    is_main_thread: bool,
-    dead_state: u32,
-    shift: bool,
-    alt: bool, // options
-    caps_lock: bool,
-}
-
-impl Keyboard {
-    pub fn new() -> Option<Keyboard> {
-        Some(Keyboard {
-            is_main_thread: true,
-            dead_state: 0,
-            shift: false,
-            alt: false,
-            caps_lock: false,
-        })
-    }
-
-    pub fn set_is_main_thread(&mut self, b: bool) {
-        self.is_main_thread = b;
-    }
-
-    fn modifier_state(&self) -> ModifierState {
-        if self.alt && (self.shift || self.caps_lock) {
-            10
-        } else if self.alt && !(self.shift || self.caps_lock) {
-            8
-        } else if !self.alt && (self.caps_lock || self.shift) {
-            2
-        } else {
-            0
-        }
-    }
-
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) unsafe fn create_unicode_for_key(
-        &mut self,
-        code: u32,
-        flags: CGEventFlags,
-    ) -> Option<UnicodeInfo> {
-        let flags_bits = flags.bits();
-        if flags_bits & NSEventModifierFlagCommand != 0
-            || flags_bits & NSEventModifierFlagControl != 0
-        {
-            return None;
-        }
-
-        let modifier_state = flags_to_state(flags_bits);
-
-        if self.is_main_thread {
-            self.unicode_from_code(code, modifier_state)
-        } else {
-            QUEUE.exec_sync(move || {
-                // ignore all modifiers for name
-                self.unicode_from_code(code, modifier_state)
-            })
-        }
-    }
-
-    #[inline]
-    unsafe fn unicode_from_code(
-        &mut self,
-        code: u32,
-        modifier_state: ModifierState,
-    ) -> Option<UnicodeInfo> {
-        // let mut now = std::time::Instant::now();
+/// Translates a macOS virtual keycode through the active Unicode keyboard layout.
+///
+/// The `keyboard_type` should be a CoreGraphics keyboard type ID suitable for
+/// `UCKeyTranslate`, not a Carbon physical-layout FourCC.
+///
+/// `dead_state` is read and updated by `UCKeyTranslate`. Pass `0` to start a
+/// fresh translation stream, and reuse the same value for consecutive
+/// translations on the same logical keyboard stream.
+///
+/// # Safety
+/// This must be called on the main thread because it calls Carbon/TIS APIs that
+/// read the active keyboard layout from the current application state. Dispatch
+/// to the main queue first when translating from another thread.
+pub(crate) unsafe fn unicode_from_code_with_keyboard_type(
+    code: u32,
+    modifier_state: ModifierState,
+    keyboard_type: u32,
+    dead_state: &mut u32,
+) -> Option<UnicodeInfo> {
+    let code = code.try_into().ok()?;
+    unsafe {
         let mut keyboard = TISCopyCurrentKeyboardInputSource();
         let mut layout = std::ptr::null_mut();
         if !keyboard.is_null() {
@@ -188,19 +150,17 @@ impl Keyboard {
             }
             return None;
         }
-        // println!("{:?}", now.elapsed());
 
         let mut buff = [0_u16; BUF_LEN];
-        let kb_type = super::common::LMGetKbdType();
         let mut length = 0;
         let _retval = UCKeyTranslate(
             layout_ptr,
-            code.try_into().ok()?,
+            code,
             kUCKeyActionDown,
             modifier_state,
-            kb_type as _,
+            keyboard_type,
             kUCKeyTranslateDeadKeysBit,
-            &mut self.dead_state,
+            dead_state,
             BUF_LEN,
             &mut length,
             &mut buff,
@@ -209,7 +169,7 @@ impl Keyboard {
             CFRelease(keyboard);
         }
         if length == 0 {
-            return if self.is_dead() {
+            return if *dead_state != 0 {
                 Some(UnicodeInfo {
                     name: None,
                     unicode: Vec::new(),
@@ -220,9 +180,8 @@ impl Keyboard {
             };
         }
 
-        // C0 controls
         if length == 1 {
-            match String::from_utf16(&buff[..length].to_vec()) {
+            match String::from_utf16(&buff[..length]) {
                 Ok(s) => {
                     if let Some(c) = s.chars().next() {
                         if ('\u{1}'..='\u{1f}').contains(&c) {
@@ -240,6 +199,83 @@ impl Keyboard {
             unicode,
             is_dead: false,
         })
+    }
+}
+
+pub struct Keyboard {
+    is_main_thread: bool,
+    dead_state: u32,
+    shift: bool,
+    alt: bool, // options
+    caps_lock: bool,
+}
+
+impl Keyboard {
+    pub fn new() -> Option<Keyboard> {
+        Some(Keyboard {
+            is_main_thread: true,
+            dead_state: 0,
+            shift: false,
+            alt: false,
+            caps_lock: false,
+        })
+    }
+
+    pub fn set_is_main_thread(&mut self, b: bool) {
+        self.is_main_thread = b;
+    }
+
+    fn modifier_state(&self) -> ModifierState {
+        let mut modifier_state = MODIFIER_STATE_NONE;
+        if self.shift {
+            modifier_state |= MODIFIER_STATE_SHIFT;
+        }
+        if self.caps_lock {
+            modifier_state |= MODIFIER_STATE_CAPS_LOCK;
+        }
+        if self.alt {
+            modifier_state |= MODIFIER_STATE_ALT;
+        }
+        modifier_state
+    }
+
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) unsafe fn create_unicode_for_key(
+        &mut self,
+        code: u32,
+        flags: CGEventFlags,
+    ) -> Option<UnicodeInfo> {
+        let flags_bits = flags.bits();
+        if flags_bits & NSEventModifierFlagCommand != 0
+            || flags_bits & NSEventModifierFlagControl != 0
+        {
+            return None;
+        }
+
+        let modifier_state = flags_to_state(flags_bits);
+
+        if self.is_main_thread {
+            self.unicode_from_code(code, modifier_state)
+        } else {
+            QUEUE.exec_sync(move || self.unicode_from_code(code, modifier_state))
+        }
+    }
+
+    #[inline]
+    unsafe fn unicode_from_code(
+        &mut self,
+        code: u32,
+        modifier_state: ModifierState,
+    ) -> Option<UnicodeInfo> {
+        unsafe {
+            unicode_from_code_with_keyboard_type(
+                code,
+                modifier_state,
+                super::common::LMGetKbdType() as u32,
+                &mut self.dead_state,
+            )
+        }
     }
 
     pub fn is_dead(&self) -> bool {
