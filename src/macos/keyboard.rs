@@ -83,6 +83,7 @@ extern "C" {
     static kTISPropertyUnicodeKeyLayoutData: *mut c_void;
 }
 
+#[derive(Clone)]
 pub struct Keyboard {
     is_main_thread: bool,
     dead_state: u32,

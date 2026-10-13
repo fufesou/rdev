@@ -1,6 +1,6 @@
 use crate::rdev::UnicodeInfo;
 // This code is awful. Good luck
-use crate::{key_from_code, Event, EventType, GrabError, Keyboard, KeyboardState};
+use crate::{key_from_code, Event, EventType, GrabError, Keyboard};
 use log::error;
 use mio::{unix::SourceFd, Events, Interest, Poll, Token};
 use std::{
@@ -17,6 +17,8 @@ use std::{
 use x11::xlib::{self, GrabModeAsync, KeyPressMask, KeyReleaseMask, Window};
 
 use super::common::KEYBOARD;
+
+mod record;
 
 enum GrabEvent {
     Exit,
@@ -44,11 +46,11 @@ lazy_static::lazy_static! {
     static ref GRAB_CONTROL_SENDER: Arc<Mutex<Option<Sender<GrabControl>>>> = Arc::new(Mutex::new(None));
 }
 
-const KEYPRESS_EVENT: i32 = 2;
 // It is ok to use unsafe mut here.
 static mut IS_GRABBING: bool = false;
 static mut GLOBAL_CALLBACK: Option<Box<dyn FnMut(Event) -> Option<Event>>> = None;
 const GRAB_RECV: Token = Token(0);
+const RECORD_RECV: Token = Token(1);
 
 impl KeyboardGrabber {
     fn create() -> Result<Self, GrabError> {
@@ -91,14 +93,24 @@ impl KeyboardGrabber {
         poll.registry()
             .register(&mut SourceFd(&self.grab_fd), GRAB_RECV, Interest::READABLE)
             .map_err(GrabError::IoError)?;
+        let record = if record::is_supported(self.display) {
+            Some(unsafe { record::RecordedKeyboard::new(self.display) }?)
+        } else {
+            log::warn!("X11 RECORD is unavailable; using ordinary keyboard capture. Unicode Auto-Type with temporary key mappings is unavailable.");
+            None
+        };
+        if let Some(record) = &record {
+            poll.registry()
+                .register(&mut SourceFd(&record.fd()), RECORD_RECV, Interest::READABLE)
+                .map_err(GrabError::IoError)?;
+        }
 
         let (tx, rx) = channel();
         GRAB_CONTROL_SENDER.lock().unwrap().replace(tx);
 
         let display_lock = Arc::new(Mutex::new(self.display as u64));
         start_grab_control_thread(display_lock.clone(), self.window, rx);
-        loop_poll_x_event(display_lock, poll);
-        Ok(())
+        loop_poll_x_event(display_lock, poll, record)
     }
 }
 
@@ -125,7 +137,7 @@ fn is_control(unicode_info: &Option<UnicodeInfo>) -> bool {
     })
 }
 
-fn convert_event(code: u32, is_press: bool) -> Event {
+fn convert_event(code: u32, is_press: bool, state: u32) -> Event {
     let key = key_from_code(code);
     let event_type = if is_press {
         EventType::KeyPress(key)
@@ -136,7 +148,12 @@ fn convert_event(code: u32, is_press: bool) -> Event {
     let (unicode, platform_code) = unsafe {
         if let Some(kbd) = &mut KEYBOARD {
             // delete -> \u{7f}
-            let unicode_info = kbd.add(&event_type);
+            // Auto-Type may have released Shift before this event is processed.
+            let unicode_info = if is_press {
+                kbd.unicode_from_code(code, state & !xlib::ControlMask)
+            } else {
+                None
+            };
             if is_control(&unicode_info) {
                 (None, kbd.keysym())
             } else {
@@ -225,7 +242,11 @@ fn start_grab_service() -> Result<(), GrabError> {
     Ok(())
 }
 
-fn read_x_event(x_event: &mut xlib::XEvent, display: *mut xlib::Display) {
+fn read_x_event(
+    x_event: &mut xlib::XEvent,
+    display: *mut xlib::Display,
+    forward_keys: bool,
+) -> Result<(), GrabError> {
     while (unsafe { xlib::XPending(display) }) > 0 {
         unsafe {
             // to-do: check the result.
@@ -233,13 +254,19 @@ fn read_x_event(x_event: &mut xlib::XEvent, display: *mut xlib::Display) {
             // https://linux.die.net/man/3/xnextevent
             xlib::XNextEvent(display, x_event);
         }
-        let keycode = unsafe { x_event.key.keycode };
-        let is_press = unsafe { x_event.type_ == KEYPRESS_EVENT };
-        let event = convert_event(keycode, is_press);
+        // RECORD delivers keys with their preceding map changes, before Auto-Type clears them.
+        if !forward_keys || !matches!(unsafe { x_event.type_ }, xlib::KeyPress | xlib::KeyRelease) {
+            continue;
+        }
+        let key = unsafe { x_event.key };
+        let event = convert_event(key.keycode, key.type_ == xlib::KeyPress, key.state);
         if let Some(tx) = GRAB_KEY_EVENT_SENDER.lock().unwrap().as_ref() {
-            tx.send(GrabEvent::KeyEvent(event)).ok();
+            tx.send(GrabEvent::KeyEvent(event)).map_err(|error| {
+                GrabError::IoError(std::io::Error::new(std::io::ErrorKind::BrokenPipe, error))
+            })?;
         }
     }
+    Ok(())
 }
 
 fn start_grab_control_thread(
@@ -274,7 +301,11 @@ fn start_grab_control_thread(
     });
 }
 
-fn loop_poll_x_event(display: Arc<Mutex<u64>>, mut poll: Poll) {
+fn loop_poll_x_event(
+    display: Arc<Mutex<u64>>,
+    mut poll: Poll,
+    mut record: Option<record::RecordedKeyboard>,
+) -> Result<(), GrabError> {
     let mut x_event: xlib::XEvent = unsafe { zeroed() };
     let mut events = Events::with_capacity(128);
     loop {
@@ -289,10 +320,13 @@ fn loop_poll_x_event(display: Arc<Mutex<u64>>, mut poll: Poll) {
                         GRAB_RECV => {
                             let lock = display.lock().unwrap();
                             let display = *lock as *mut xlib::Display;
-                            read_x_event(&mut x_event, display);
+                            read_x_event(&mut x_event, display, record.is_none())?;
                         }
                         _ => {}
                     }
+                }
+                if let Some(record) = &mut record {
+                    record.process()?;
                 }
             }
             Err(e) => {
@@ -301,6 +335,7 @@ fn loop_poll_x_event(display: Arc<Mutex<u64>>, mut poll: Poll) {
             }
         }
     }
+    Ok(())
 }
 
 #[inline]

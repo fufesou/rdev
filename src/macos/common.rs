@@ -1,4 +1,6 @@
 #![allow(clippy::upper_case_acronyms)]
+mod unicode;
+
 use crate::keycodes::macos::virtual_keycodes::*;
 use crate::macos::keyboard::Keyboard;
 use crate::rdev::{Button, Event, EventType, Key};
@@ -164,6 +166,9 @@ pub unsafe fn convert(
     cg_event: &CGEvent,
     keyboard_state: &mut Keyboard,
 ) -> Option<Event> {
+    if let Some(event) = unicode::convert(_type, cg_event, keyboard_state) {
+        return Some(event);
+    }
     let mut code = 0;
     let option_type = match _type {
         CGEventType::TapDisabledByTimeout => {
@@ -325,6 +330,63 @@ fn key_to_name(key: Key) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn ordinary_synthetic_a_preserves_key_events() {
+        use core_graphics::event_source::CGEventSource;
+
+        let mut keyboard = Keyboard::new().unwrap();
+        for state in [
+            CGEventSourceStateID::Private,
+            CGEventSourceStateID::HIDSystemState,
+        ] {
+            for down in [true, false] {
+                let source = CGEventSource::new(state).unwrap();
+                let event = CGEvent::new_keyboard_event(source, kVK_ANSI_A, down).unwrap();
+                event.set_flags(CGEventFlags::empty());
+                // Match the default A payload also present on events delivered by Quartz.
+                event.set_string("a");
+                let (kind, expected) = if down {
+                    (CGEventType::KeyDown, EventType::KeyPress(Key::KeyA))
+                } else {
+                    (CGEventType::KeyUp, EventType::KeyRelease(Key::KeyA))
+                };
+                let converted = unsafe { convert(kind, &event, &mut keyboard) }.unwrap();
+                assert_eq!(converted.event_type, expected, "source: {state:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn injected_unicode_preserves_text() {
+        use core_graphics::event_source::CGEventSource;
+
+        let mut keyboard = Keyboard::new().unwrap();
+        for text in ["a8*6", "汉", "😀"] {
+            let source = CGEventSource::new(CGEventSourceStateID::Private).unwrap();
+            let event = CGEvent::new_keyboard_event(source, kVK_ANSI_A, true).unwrap();
+            event.set_string(text);
+            let converted =
+                unsafe { convert(CGEventType::KeyDown, &event, &mut keyboard) }.unwrap();
+            let unicode = converted.unicode.unwrap();
+            assert_eq!(unicode.name.as_deref(), Some(text));
+            assert_eq!(unicode.unicode, text.encode_utf16().collect::<Vec<_>>());
+            assert_eq!(converted.event_type, EventType::KeyPress(Key::Unknown(0)));
+            let released = unsafe { convert(CGEventType::KeyUp, &event, &mut keyboard) }.unwrap();
+            assert_eq!(released.event_type, EventType::KeyRelease(Key::Unknown(0)));
+            assert!(released.unicode.is_none());
+            event.set_flags(CGEventFlags::CGEventFlagControl);
+            let shortcut = unsafe { convert(CGEventType::KeyDown, &event, &mut keyboard) }.unwrap();
+            assert_eq!(shortcut.event_type, EventType::KeyPress(Key::KeyA));
+            event.set_flags(CGEventFlags::empty());
+            event.set_integer_value_field(EventField::EVENT_SOURCE_UNIX_PROCESS_ID, 0);
+            let physical = unsafe { convert(CGEventType::KeyDown, &event, &mut keyboard) }.unwrap();
+            assert_eq!(physical.event_type, EventType::KeyPress(Key::KeyA));
+        }
+    }
+
     #[test]
     #[allow(non_snake_case)]
     fn test_KBGetLayoutType() {
