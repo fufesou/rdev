@@ -1,3 +1,7 @@
+//! Decode recorded protocol bytes, not native Xlib structs. The variable-length
+//! XKB key types precede the symbol maps; offsets follow the XkbSetMap wire layout:
+//! https://xorg.freedesktop.org/archive/current/doc/kbproto/xkbproto.html
+
 use crate::{key_from_code, rdev::UnicodeInfo, Event, EventType, Key};
 use std::{convert::TryInto, io, time::SystemTime};
 use x11::xlib;
@@ -156,6 +160,7 @@ fn unicode(symbol: u32) -> Option<UnicodeInfo> {
     } else {
         symbol.checked_sub(UNICODE_KEYSYM)?
     };
+    // Injected UTF-16 halves must reach the consumer intact so it can join pairs.
     let unicode = if SURROGATES.contains(&code) {
         vec![code as u16]
     } else {

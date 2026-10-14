@@ -1,3 +1,8 @@
+//! Keep temporary mapping changes and grabbed keys in one RECORD stream; querying
+//! the live keymap later can see KeePassXC's already-restored mapping instead.
+//! RECORD connection, client-selection, and callback contracts:
+//! https://xorg.freedesktop.org/archive/current/doc/libXtst/recordlib.html
+
 mod mapping;
 
 use super::{GrabEvent, GRAB_KEY_EVENT_SENDER};
@@ -101,6 +106,8 @@ impl RecordedKeyboard {
     }
 
     unsafe fn events(&self, display: *mut xlib::Display) -> io::Result<()> {
+        // RECORD accepts a client's resource ID. Use one from the grab connection
+        // to record delivered keys only for that client, not global device events.
         let mut client = xlib::XCreateSimpleWindow(
             display,
             xlib::XDefaultRootWindow(display),

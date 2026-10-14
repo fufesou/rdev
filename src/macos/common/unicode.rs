@@ -73,8 +73,14 @@ fn has_explicit_unicode(event: &CGEvent, unicode: &[u16]) -> Result<bool, &'stat
         return Err("Cannot copy macOS keyboard event");
     }
     let copy = unsafe { CFType::wrap_under_create_rule(copy) };
-    // The getter also returns layout-derived text. Setting it explicitly changes
-    // a physical event's data, but leaves an existing Unicode override unchanged.
+    // The getter also returns layout-derived text; the setter explicitly overrides it:
+    // https://developer.apple.com/documentation/coregraphics/cgevent/keyboardsetunicodestring(stringlength:unicodestring:)
+    // Setting it on a copy changes layout-derived data but preserves an explicit
+    // override in the tested CoreGraphics implementation. This is an observed
+    // distinction, not a documented serialization guarantee; recheck both ordinary
+    // synthetic A and explicit Unicode when validating another macOS release.
+    // Compare opaque data, never private byte offsets:
+    // https://developer.apple.com/documentation/coregraphics/cgeventcreatedata
     unsafe {
         CGEventKeyboardSetUnicodeString(copy.as_CFTypeRef(), unicode.len(), unicode.as_ptr())
     };
