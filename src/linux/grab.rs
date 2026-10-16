@@ -93,17 +93,27 @@ impl KeyboardGrabber {
         poll.registry()
             .register(&mut SourceFd(&self.grab_fd), GRAB_RECV, Interest::READABLE)
             .map_err(GrabError::IoError)?;
+        let initialize_record = || -> Result<_, GrabError> {
+            let record = unsafe { record::RecordedKeyboard::new(self.display) }?;
+            poll.registry()
+                .register(&mut SourceFd(&record.fd()), RECORD_RECV, Interest::READABLE)
+                .map_err(GrabError::IoError)?;
+            Ok(record)
+        };
         let record = if record::is_supported(self.display) {
-            Some(unsafe { record::RecordedKeyboard::new(self.display) }?)
+            initialize_record()
+                .or_else(|error| {
+                    log::warn!("Failed to initialize X11 RECORD: {error:?}; retrying once.");
+                    initialize_record()
+                })
+                .map_err(|error| {
+                    log::warn!("X11 RECORD initialization failed again: {error:?}; using ordinary keyboard capture. Unicode Auto-Type with temporary key mappings is unavailable.");
+                })
+                .ok()
         } else {
             log::warn!("X11 RECORD is unavailable; using ordinary keyboard capture. Unicode Auto-Type with temporary key mappings is unavailable.");
             None
         };
-        if let Some(record) = &record {
-            poll.registry()
-                .register(&mut SourceFd(&record.fd()), RECORD_RECV, Interest::READABLE)
-                .map_err(GrabError::IoError)?;
-        }
 
         let (tx, rx) = channel();
         GRAB_CONTROL_SENDER.lock().unwrap().replace(tx);
