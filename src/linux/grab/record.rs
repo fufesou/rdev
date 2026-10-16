@@ -52,7 +52,6 @@ impl RecordedKeyboard {
         }
         record.requests().map_err(GrabError::IoError)?;
         record.events(display).map_err(GrabError::IoError)?;
-        xlib::XSync(record.control, xlib::False);
         let state = &mut *record.state as *mut RecordState;
         let enabled = xrecord::XRecordEnableContextAsync(
             record.data,
@@ -132,6 +131,8 @@ impl RecordedKeyboard {
             &mut &mut range as *mut &mut _ as _,
             1,
         );
+        // Registration on the control connection must finish while the resource exists.
+        xlib::XSync(self.control, xlib::False);
         xlib::XDestroyWindow(display, client);
         if registered == 0 {
             return Err(record_error("Cannot record grabbed keyboard events"));
@@ -182,7 +183,11 @@ impl RecordState {
             .ok_or_else(|| record_error("Invalid keyboard record length"))?;
         let data = slice::from_raw_parts(raw.data, length);
         if raw.category == xrecord::XRecordFromClient {
-            return self.mapping.update(data, raw.client_swapped != 0);
+            // RECORD sees requests before server validation; keep the previous map on error.
+            if let Err(error) = self.mapping.update(data, raw.client_swapped != 0) {
+                log::trace!("Discarding invalid X11 keyboard mapping request: {error}");
+            }
+            return Ok(());
         }
         let event = self.mapping.event(data, raw.client_swapped != 0)?;
         let sender = GRAB_KEY_EVENT_SENDER.lock().unwrap();

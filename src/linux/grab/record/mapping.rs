@@ -15,7 +15,6 @@ const LATIN1_KEYSYMS: std::ops::RangeInclusive<u32> = 0xA0..=0xFF;
 const SURROGATES: std::ops::RangeInclusive<u32> = 0xD800..=0xDFFF;
 const XKB_KEY_TYPES: u16 = 1;
 const XKB_KEY_SYMS: u16 = 2;
-const KEYSYM_BYTES: usize = 4;
 const REQUEST_LENGTH_BYTES: usize = 2;
 const CORE_MAP_PADDING_BYTES: usize = 2;
 const XKB_DEVICE_SPEC_BYTES: usize = 2;
@@ -39,6 +38,16 @@ impl Default for Mapping {
 
 impl Mapping {
     pub(super) fn update(&mut self, data: &[u8], swapped: bool) -> io::Result<()> {
+        let mut pending = Self {
+            symbols: self.symbols,
+            xkb_opcode: self.xkb_opcode,
+        };
+        pending.read_request(data, swapped)?;
+        self.symbols = pending.symbols;
+        Ok(())
+    }
+
+    fn read_request(&mut self, data: &[u8], swapped: bool) -> io::Result<()> {
         let mut wire = Wire { data, swapped };
         let opcode = wire.byte()?;
         let detail = wire.byte()?;
@@ -79,8 +88,13 @@ impl Mapping {
     }
 
     fn read_symbols(&mut self, index: usize, count: usize, wire: &mut Wire<'_>) -> io::Result<()> {
-        let symbol = if count == 0 { 0 } else { wire.long()? };
-        wire.skip(count.saturating_sub(1) * KEYSYM_BYTES)?;
+        let mut symbol = if count == 0 { 0 } else { wire.long()? };
+        // Distinct levels need normal modifier-aware conversion, not literal text.
+        for _ in 1..count {
+            if wire.long()? != symbol {
+                symbol = 0;
+            }
+        }
         let target = self.symbols.get_mut(index).ok_or_else(invalid_mapping)?;
         *target = symbol;
         Ok(())
@@ -235,51 +249,4 @@ fn invalid_mapping() -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn latin1_mapped_keys_are_text() {
-        for (keycode, text) in [(202, 'é'), (248, 'ü'), (248, '~'), (202, ' ')] {
-            let mut mapping = Mapping::default();
-            let mut request = vec![CHANGE_KEYBOARD_MAPPING, 1, 3, 0, keycode, 1, 0, 0];
-            request.extend_from_slice(&u32::from(text).to_ne_bytes());
-            mapping.update(&request, false).unwrap();
-            let mut wire_event = [0; 32];
-            wire_event[0] = xlib::KeyPress as u8;
-            wire_event[1] = keycode;
-            let event = mapping.event(&wire_event, false).unwrap();
-            let key = Key::Unknown(u32::from(keycode));
-            assert_eq!(event.event_type, EventType::KeyPress(key));
-            assert_eq!(event.unicode.unwrap().name, Some(text.to_string()));
-        }
-    }
-
-    #[test]
-    fn unicode_mapped_function_key_is_text() {
-        const F24_KEYCODE: u8 = 202;
-        let mut mapping = Mapping::default();
-        let mut request = vec![CHANGE_KEYBOARD_MAPPING, 1, 3, 0, F24_KEYCODE, 1, 0, 0];
-        request.extend_from_slice(&(UNICODE_KEYSYM | u32::from('汉')).to_ne_bytes());
-        mapping.update(&request, false).unwrap();
-        let mut wire_event = [0; 32];
-        wire_event[0] = xlib::KeyPress as u8;
-        wire_event[1] = F24_KEYCODE;
-        let event = mapping.event(&wire_event, false).unwrap();
-        assert_eq!(event.event_type, EventType::KeyPress(Key::Unknown(202)));
-        assert_eq!(event.unicode.unwrap().name.as_deref(), Some("汉"));
-
-        wire_event[0] = xlib::KeyRelease as u8;
-        let event = mapping.event(&wire_event, false).unwrap();
-        assert_eq!(event.event_type, EventType::KeyRelease(Key::Unknown(202)));
-        assert!(event.unicode.is_none());
-
-        request[8..].copy_from_slice(&x11::keysym::XK_F24.to_ne_bytes());
-        mapping.update(&request, false).unwrap();
-        wire_event[0] = xlib::KeyPress as u8;
-        assert_eq!(
-            mapping.event(&wire_event, false).unwrap().event_type,
-            EventType::KeyPress(Key::F24)
-        );
-    }
-}
+mod tests;
