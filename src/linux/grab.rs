@@ -311,6 +311,34 @@ fn start_grab_control_thread(
     });
 }
 
+fn process_record(
+    record: &mut Option<record::RecordedKeyboard>,
+    poll: &Poll,
+    display: &Arc<Mutex<u64>>,
+) -> Result<(), GrabError> {
+    let Some(recorder) = record.as_mut() else {
+        return Ok(());
+    };
+    let Err(error) = recorder.process() else {
+        return Ok(());
+    };
+    if !matches!(&error, GrabError::IoError(error) if error.kind() == std::io::ErrorKind::InvalidData)
+    {
+        return Err(error);
+    }
+    poll.registry()
+        .deregister(&mut SourceFd(&recorder.fd()))
+        .map_err(GrabError::IoError)?;
+    *record = None;
+    // RECORD can deliver keys before their copies reach the grab connection.
+    let lock = display.lock().unwrap();
+    unsafe { xlib::XSync(*lock as *mut xlib::Display, xlib::False) };
+    let mut x_event = unsafe { zeroed() };
+    read_x_event(&mut x_event, *lock as *mut xlib::Display, false)?;
+    log::warn!("X11 RECORD event processing failed: {error:?}; using ordinary keyboard capture. Queued input was discarded to avoid replaying recorded keys; Unicode Auto-Type with temporary key mappings is unavailable.");
+    Ok(())
+}
+
 fn loop_poll_x_event(
     display: Arc<Mutex<u64>>,
     mut poll: Poll,
@@ -335,9 +363,7 @@ fn loop_poll_x_event(
                         _ => {}
                     }
                 }
-                if let Some(record) = &mut record {
-                    record.process()?;
-                }
+                process_record(&mut record, &poll, &display)?;
             }
             Err(e) => {
                 log::error!("Failed to poll event, {}", e);

@@ -180,7 +180,9 @@ impl RecordState {
         let length = (raw.data_len as usize)
             .checked_mul(RECORD_UNIT_BYTES)
             .filter(|length| *length <= isize::MAX as usize)
-            .ok_or_else(|| record_error("Invalid keyboard record length"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "Invalid keyboard record length")
+            })?;
         let data = slice::from_raw_parts(raw.data, length);
         if raw.category == xrecord::XRecordFromClient {
             // RECORD sees requests before server validation; keep the previous map on error.
