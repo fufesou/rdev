@@ -100,7 +100,10 @@ impl KeyboardGrabber {
                 .map_err(GrabError::IoError)?;
             Ok(record)
         };
-        let record = if record::is_supported(self.display) {
+        // Keep RECORD opt-in until ordinary input has broader desktop regression coverage.
+        let record = if std::env::var("RDEV_ENABLE_RECORD").as_deref() != Ok("1") {
+            None
+        } else if record::is_supported(self.display) {
             initialize_record()
                 .or_else(|error| {
                     log::warn!("Failed to initialize X11 RECORD: {error:?}; retrying once.");
@@ -322,6 +325,8 @@ fn process_record(
     let Err(error) = recorder.process() else {
         return Ok(());
     };
+    // process() uses InvalidData for invalid RECORD lengths or key-event payloads.
+    // Mapping-request parse errors are discarded in receive(); delivery errors must propagate.
     if !matches!(&error, GrabError::IoError(error) if error.kind() == std::io::ErrorKind::InvalidData)
     {
         return Err(error);
@@ -335,7 +340,7 @@ fn process_record(
     unsafe { xlib::XSync(*lock as *mut xlib::Display, xlib::False) };
     let mut x_event = unsafe { zeroed() };
     read_x_event(&mut x_event, *lock as *mut xlib::Display, false)?;
-    log::warn!("X11 RECORD event processing failed: {error:?}; using ordinary keyboard capture. Queued input was discarded to avoid replaying recorded keys; Unicode Auto-Type with temporary key mappings is unavailable.");
+    log::warn!("X11 RECORD event processing failed: {error:?}; using ordinary keyboard capture. Queued input was discarded to avoid replaying recorded keys; lost key-release events may leave keys pressed in the consumer. Unicode Auto-Type with temporary key mappings is unavailable.");
     Ok(())
 }
 
