@@ -21,6 +21,9 @@ const XKB_DEVICE_SPEC_BYTES: usize = 2;
 const XKB_FLAGS_AND_BOUNDS_BYTES: usize = 5;
 const XKB_REMAINING_HEADER_BYTES: usize = 20;
 const XKB_SYMBOL_MAP_PREFIX_BYTES: usize = 6;
+// Conventional XKB assignments: Alt = Mod1, Super = Mod4. Shift and Mod5
+// (AltGr) can generate text. Custom modifier assignments are not inferred here.
+const DEFAULT_SHORTCUT_MODIFIERS: u32 = xlib::ControlMask | xlib::Mod1Mask | xlib::Mod4Mask;
 
 pub(super) struct Mapping {
     symbols: [u32; KEYCODE_COUNT],
@@ -120,9 +123,9 @@ impl Mapping {
         } else {
             None
         };
-        let text =
-            unicode.is_some() && (matches!(key, Key::Unknown(_)) || state & xlib::ControlMask == 0);
-        // Ctrl can change before release. Refresh on each press so a release
+        let text = unicode.is_some()
+            && (matches!(key, Key::Unknown(_)) || state & DEFAULT_SHORTCUT_MODIFIERS == 0);
+        // Modifiers can change before release. Refresh on each press so a release
         // missed while ungrabbed cannot leave a stale classification.
         let text = if is_press {
             self.pressed_text[code as usize] = Some(text);
