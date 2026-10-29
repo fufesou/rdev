@@ -93,3 +93,34 @@ fn only_uniform_symbol_maps_are_text() {
         }
     }
 }
+
+#[test]
+fn control_modified_function_key_preserves_press_release_pair() {
+    const F24_KEYCODE: u8 = 202;
+    let mut mapping = Mapping::default();
+    let mut request = vec![CHANGE_KEYBOARD_MAPPING, 1, 3, 0, F24_KEYCODE, 1, 0, 0];
+    request.extend_from_slice(&u32::from('a').to_ne_bytes());
+    mapping.update(&request, false).unwrap();
+    let text_key = Key::Unknown(u32::from(F24_KEYCODE));
+    let mut wire_event = [0; 32];
+    wire_event[1] = F24_KEYCODE;
+    // Releasing Ctrl first must keep the shortcut pair; Auto-Type also keeps its pair.
+    for (event_type, state, key) in [
+        (xlib::KeyPress, xlib::ControlMask, Key::F24),
+        (xlib::KeyRelease, xlib::ControlMask, Key::F24),
+        (xlib::KeyPress, xlib::ControlMask, Key::F24),
+        (xlib::KeyRelease, 0, Key::F24),
+        (xlib::KeyPress, 0, text_key),
+        (xlib::KeyRelease, xlib::ControlMask, text_key),
+    ] {
+        wire_event[0] = event_type as u8;
+        wire_event[28..30].copy_from_slice(&(state as u16).to_ne_bytes());
+        let event = mapping.event(&wire_event, false).unwrap();
+        let expected = if event_type == xlib::KeyPress {
+            EventType::KeyPress(key)
+        } else {
+            EventType::KeyRelease(key)
+        };
+        assert_eq!(event.event_type, expected, "modifier state: {state:#x}");
+    }
+}

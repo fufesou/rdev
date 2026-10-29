@@ -24,6 +24,7 @@ const XKB_SYMBOL_MAP_PREFIX_BYTES: usize = 6;
 
 pub(super) struct Mapping {
     symbols: [u32; KEYCODE_COUNT],
+    pressed_text: [Option<bool>; KEYCODE_COUNT],
     pub(super) xkb_opcode: u8,
 }
 
@@ -31,6 +32,7 @@ impl Default for Mapping {
     fn default() -> Self {
         Self {
             symbols: [0; KEYCODE_COUNT],
+            pressed_text: [None; KEYCODE_COUNT],
             xkb_opcode: 0,
         }
     }
@@ -40,6 +42,7 @@ impl Mapping {
     pub(super) fn update(&mut self, data: &[u8], swapped: bool) -> io::Result<()> {
         let mut pending = Self {
             symbols: self.symbols,
+            pressed_text: self.pressed_text,
             xkb_opcode: self.xkb_opcode,
         };
         pending.read_request(data, swapped)?;
@@ -100,7 +103,7 @@ impl Mapping {
         Ok(())
     }
 
-    pub(super) fn event(&self, data: &[u8], swapped: bool) -> io::Result<Event> {
+    pub(super) fn event(&mut self, data: &[u8], swapped: bool) -> io::Result<Event> {
         const EVENT_STATE_OFFSET: usize = 28;
         const EVENT_TYPE_AND_DETAIL_BYTES: usize = 2;
         const SEND_EVENT_FLAG: u8 = 0x80;
@@ -117,9 +120,19 @@ impl Mapping {
         } else {
             None
         };
-        let Some(unicode) = unicode else {
-            return Ok(super::super::convert_event(code, is_press, state));
+        let text =
+            unicode.is_some() && (matches!(key, Key::Unknown(_)) || state & xlib::ControlMask == 0);
+        // Ctrl can change before release. Refresh on each press so a release
+        // missed while ungrabbed cannot leave a stale classification.
+        let text = if is_press {
+            self.pressed_text[code as usize] = Some(text);
+            text
+        } else {
+            self.pressed_text[code as usize].take().unwrap_or(text)
         };
+        if !text {
+            return Ok(super::super::convert_event(code, is_press, state));
+        }
         let key = Key::Unknown(code);
         Ok(Event {
             event_type: if is_press {
@@ -128,7 +141,7 @@ impl Mapping {
                 EventType::KeyRelease(key)
             },
             time: SystemTime::now(),
-            unicode: if is_press { Some(unicode) } else { None },
+            unicode: if is_press { unicode } else { None },
             platform_code: symbol,
             position_code: code,
             usb_hid: 0,
